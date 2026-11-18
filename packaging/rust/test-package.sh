@@ -43,6 +43,41 @@ EXTRACTED="$STAGE/extracted/doltlite-0.0.0"
 [ -f "$EXTRACTED/LICENSE.md" ] || {
   echo "ERROR: packaged crate has no LICENSE.md" >&2; exit 1; }
 
+# The engine defines every sqlite3_* symbol, so a second SQLite in the same
+# binary (libsqlite3-sys, behind rusqlite) silently wins or loses by link
+# order. Cargo must refuse the pair at resolution time instead.
+CLASH="$STAGE/clash"
+mkdir -p "$CLASH/other-sqlite3/src" "$CLASH/consumer/src"
+cat > "$CLASH/other-sqlite3/Cargo.toml" <<'EOF'
+[package]
+name = "other-sqlite3"
+version = "0.0.0"
+edition = "2021"
+links = "sqlite3"
+EOF
+echo 'fn main() {}' > "$CLASH/other-sqlite3/build.rs"
+: > "$CLASH/other-sqlite3/src/lib.rs"
+cat > "$CLASH/consumer/Cargo.toml" <<EOF
+[package]
+name = "clash-consumer"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+doltlite = { path = "$EXTRACTED" }
+other-sqlite3 = { path = "../other-sqlite3" }
+EOF
+: > "$CLASH/consumer/src/lib.rs"
+if CLASH_OUT="$(cd "$CLASH/consumer" && cargo generate-lockfile 2>&1)"; then
+  echo "ERROR: cargo accepted doltlite next to another crate that links sqlite3" >&2
+  exit 1
+fi
+grep -q 'links to the native library `sqlite3`' <<<"$CLASH_OUT" || {
+  echo "ERROR: cargo refused the pair for another reason:" >&2
+  echo "$CLASH_OUT" >&2
+  exit 1
+}
+
 cp -R "$PKG_DIR/smoke-test/." "$CONSUMER/"
 # Point the consumer at the extracted package rather than crates.io.
 sed -i.bak "s|^doltlite = .*|doltlite = { path = \"$EXTRACTED\" }|" \
